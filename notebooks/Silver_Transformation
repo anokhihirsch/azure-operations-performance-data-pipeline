@@ -1,0 +1,135 @@
+# Databricks Notebook: Silver Orders Transformation
+# Project: Azure Operations Analytics Data Platform
+
+
+# Import required PySpark functions
+
+from pyspark.sql.functions import (
+    col,
+    to_date,
+    datediff,
+    when,
+    current_timestamp,
+    trim,
+    upper,
+    round
+)
+
+
+# Define storage paths
+
+storage_account = "operationsperformace"
+
+bronze_orders_path = f"abfss://bronze@{storage_account}.dfs.core.windows.net/bronze_orders/"
+silver_orders_path = f"abfss://silver@{storage_account}.dfs.core.windows.net/orders/"
+
+print("Bronze path:", bronze_orders_path)
+print("Silver path:", silver_orders_path)
+
+
+# Read Bronze orders data
+
+df = (
+    spark.read
+    .format("delta")
+    .load(bronze_orders_path)
+)
+
+display(df)
+
+# Clean text columns
+
+df_clean = (
+    df
+    .withColumn("order_status", upper(trim(col("order_status"))))
+    .withColumn("ship_org", upper(trim(col("ship_org"))))
+)
+
+
+# Convert date columns from text to date type
+
+df_clean = (
+    df_clean
+    .withColumn("order_date", to_date(col("order_date")))
+    .withColumn("requested_delivery_date", to_date(col("requested_delivery_date")))
+    .withColumn("promise_date", to_date(col("promise_date")))
+    .withColumn("actual_ship_date", to_date(col("actual_ship_date")))
+)
+
+# Convert numeric columns to correct data types
+
+df_clean = (
+    df_clean
+    .withColumn("order_amount", col("order_amount").cast("double"))
+    .withColumn("order_quantity", col("order_quantity").cast("int"))
+)
+
+
+# Handle null values
+
+df_clean = (
+    df_clean
+    .fillna({
+        "order_status": "UNKNOWN",
+        "ship_org": "UNKNOWN",
+        "order_amount": 0,
+        "order_quantity": 0
+    })
+)
+
+
+# Create business transformation columns
+
+df_clean = (
+    df_clean
+    .withColumn(
+        "days_to_ship",
+        datediff(col("actual_ship_date"), col("order_date"))
+    )
+    .withColumn(
+        "days_late_vs_promise",
+        datediff(col("actual_ship_date"), col("promise_date"))
+    )
+    .withColumn(
+        "is_late",
+        when(col("actual_ship_date") > col("promise_date"), 1).otherwise(0)
+    )
+    .withColumn(
+        "is_shipped",
+        when(col("actual_ship_date").isNotNull(), 1).otherwise(0)
+    )
+    .withColumn(
+        "order_amount",
+        round(col("order_amount"), 2)
+    )
+    .withColumn(
+        "silver_processed_timestamp",
+        current_timestamp()
+    )
+)
+
+# Preview cleaned Silver orders data
+
+display(df_clean)
+
+
+# Write transformed data to Silver layer as Delta
+
+(
+    df_clean.write
+    .format("delta")
+    .mode("overwrite")
+    .save(silver_orders_path)
+)
+
+print("Silver orders transformation completed.")
+
+# Read Silver data back to confirm
+
+silver_df = (
+    spark.read
+    .format("delta")
+    .load(silver_orders_path)
+)
+
+display(silver_df)
